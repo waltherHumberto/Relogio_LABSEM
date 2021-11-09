@@ -1,10 +1,15 @@
+
+#define F_CPU 16000000ul
+
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <LiquidCrystal.h>
 #include <string.h>
 
 LiquidCrystal lcd(8, 9, 10, 11, 12, 13);
-#define TIMER1_MODULE 15625
+#define MODULE_SEGUN 312500
+#define MODULE_MICRO 6250
+
 #define FALSE 0
 #define TRUE 1
 #define _ltrans(x, xi, xm, yi, ym) (long)((long)(x - xi) * (long)(ym - yi)) / (long)(xm - xi) + yi
@@ -19,6 +24,7 @@ LiquidCrystal lcd(8, 9, 10, 11, 12, 13);
 #define REL_MIN 8
 #define REL_HRA 9
 #define ALARME_ATIV 10
+#define PREPARANDO_CRON 11
 
 typedef struct
 {
@@ -26,6 +32,9 @@ typedef struct
     char minuto;
     char segundo;
     char segundoAnt;
+    char miliseg;
+    char milisegAnt;
+
 } Rel;
 
 typedef enum
@@ -41,12 +50,12 @@ unsigned int Le_AD(void);
 void AcertaRelogio(Rel *r);
 void configura_alarme(Rel *a);
 void print_hora_atual(Rel *r, Rel *A);
-void conta_cronometro(Rel *r);
+void conta_cronometro(Rel *c);
 
 relogio_state Estado_Rel = HORA_ATUAL;
 char Seleciona = FALSE;
 int counter = 0;
-Rel *pts;
+Rel *pts, *cro;
 
 char *mensagem[20] = {
     "   Hora Atual   ",
@@ -59,29 +68,48 @@ char *mensagem[20] = {
     " Set Rel - Seg  ",
     " Set Rel - Min  ",
     " Set Rel - Hra  ",
-    "   ALARME !!!!  "};
+    "   ALARME !!!!  ",
+    "Preparando Crono"};
 
 int index = 0;
 
+void muda_modulo()
+{
+    if (Estado_Rel == CRONOMETRO)
+        OCR1A = MODULE_MICRO - 1;
+    else
+        OCR1A = MODULE_SEGUN - 1;
+}
+
+void limpa_cantos_lcd()
+{
+    putmessage(1, 0, "    ");
+    putmessage(1, 12, "    ");
+}
 int main(void)
 {
-    Rel Relogio = {0, 0, 0, 0};
-    Rel Alarme = {9, 9, 9, 9};
-    pts = &Relogio;
-    init_dsp(2, 16);
-    putmessage(0, 3, mensagem[1]);
-    putmessage(1, 4, "00:00:00");
+    Rel Relogio = {0, 0, 0, 0, 0};
+    Rel Alarme = {9, 9, 9, 9, 9};
+    Rel Crono = {0, 0, 0, 0, 0};
 
-    OCR1A = TIMER1_MODULE - 1;
-    TCCR1B = _BV(WGM12) | _BV(CS12) | _BV(CS10); // FPS = 1024
+    pts = &Relogio;
+    cro = &Crono;
+    init_dsp(2, 16);
+    putmessage(0, 0, mensagem[0]);
+    putmessage(1, 4, "00:00:00");
+    OCR1A = MODULE_SEGUN - 1;        // inicia medindo segundos
+    TCCR1B = _BV(WGM12) | _BV(CS12); // FPS = 256
     TIMSK1 = _BV(OCIE1A);
-    EICRA = _BV(ISC01) | _BV(ISC00);
+    EICRA = _BV(ISC11) | _BV(ISC10) | _BV(ISC01) | _BV(ISC00);
     EIMSK = _BV(INT0) | _BV(INT1);
+    DDRD = _BV(DDD4); // configura PD4 como saida
+
     sei();
 
     for (;;)
     {
         putmessage(0, 0, mensagem[index]);
+        limpa_cantos_lcd();
         switch (Estado_Rel)
         {
         case HORA_ATUAL:
@@ -93,7 +121,7 @@ int main(void)
             break;
 
         case CRONOMETRO:
-            conta_cronometro(&Relogio);
+            conta_cronometro(&Crono);
             break;
 
         case ACERTA_REL:
@@ -107,6 +135,8 @@ int main(void)
 
 void AcertaRelogio(Rel *r)
 {
+    putmessage(1, 9, ":");
+
     static char State = -1;
 
     if (Seleciona)
@@ -135,12 +165,15 @@ void AcertaRelogio(Rel *r)
     case 3:
         index = NORMAL;
         Estado_Rel = HORA_ATUAL;
+        State = 0;
         break;
     }
 }
 
 void configura_alarme(Rel *a)
 {
+    putmessage(1, 9, ":");
+
     static char State = -1;
 
     if (Seleciona)
@@ -168,6 +201,8 @@ void configura_alarme(Rel *a)
         break;
     case 3:
         Estado_Rel = HORA_ATUAL;
+        State = 0;
+
         break;
     }
 }
@@ -178,37 +213,18 @@ void print_hora_atual(Rel *r, Rel *A)
     if (A->hora == r->hora && A->minuto == r->minuto)
     {
         index = ALARME_ATIV;
+        putnumber_i(1, 4, A->hora, 2);
+        putnumber_i(1, 7, A->minuto, 2);
+        putmessage(1, 9, "   ");
+
+        PORTD |= (1 << PORTD4); // Liga LED
     }
     else
     {
         index = NORMAL;
-    }
-    if (r->segundoAnt != r->segundo)
-    {
-        r->segundoAnt = r->segundo;
-        putnumber_i(1, 4, r->hora, 2);
-        putnumber_i(1, 7, r->minuto, 2);
-        putnumber_i(1, 10, r->segundo, 2);
-    }
-}
+        PORTD &= ~(1 << PORTD4); // Apaga LED
+        putmessage(1, 9, ":");
 
-void conta_cronometro(Rel *r)
-{
-    static char State = -1;
-
-    if (Seleciona)
-    {
-        Seleciona = FALSE;
-        State++;
-        State %= 3;
-    }
-    switch (State)
-    {
-    case 0:
-        index = CRON_START;
-        break;
-    case 1:
-        index = CRON_PAUSE;
         if (r->segundoAnt != r->segundo)
         {
             r->segundoAnt = r->segundo;
@@ -216,9 +232,53 @@ void conta_cronometro(Rel *r)
             putnumber_i(1, 7, r->minuto, 2);
             putnumber_i(1, 10, r->segundo, 2);
         }
+    }
+}
+
+void conta_cronometro(Rel *c)
+{
+    static char State = -1;
+    putmessage(1, 11, " ");
+    putmessage(1, 9, ",");
+
+    if (Seleciona)
+    {
+        Seleciona = FALSE;
+        State++;
+        State %= 4;
+    }
+    switch (State)
+    {
+    case 0:
+        index = CRON_START;
+        c->miliseg = 0;
+        c->segundo = 0;
+        c->minuto = 0;
+        c->hora = 0;
+        break;
+
+    case 1:
+        index = CRON_PAUSE;
+        if (c->milisegAnt != c->miliseg)
+        {
+            c->milisegAnt = c->miliseg;
+            putnumber_i(1, 4, c->minuto, 2);
+            putnumber_i(1, 7, c->segundo, 2);
+            putnumber_i(1, 10, c->miliseg, 1);
+        }
+
+        break;
+    case 2:
+        index = CRON_STOP;
+        break;
+
     case 3:
         index = NORMAL;
+
         Estado_Rel = HORA_ATUAL;
+        muda_modulo();
+        State = 0;
+
         break;
 
     default:
@@ -231,7 +291,7 @@ ISR(INT0_vect) // Seleciona o Modo
 
     if (Estado_Rel == HORA_ATUAL)
     {
-        index = CRON_START;
+        index = PREPARANDO_CRON;
         Estado_Rel = CRONOMETRO;
     }
     else if (Estado_Rel == CRONOMETRO)
@@ -249,15 +309,20 @@ ISR(INT0_vect) // Seleciona o Modo
         index = NORMAL;
         Estado_Rel = HORA_ATUAL;
     }
+    muda_modulo();
 }
 
 ISR(INT1_vect) //Seleciona o modo
 {
-    Seleciona = TRUE;
+    if (Estado_Rel)
+    {
+        Seleciona = TRUE;
+    }
 }
 
 ISR(TIMER1_COMPA_vect)
 {
+
     if (!Estado_Rel)
     {
         if (++pts->segundo == 60)
@@ -268,6 +333,21 @@ ISR(TIMER1_COMPA_vect)
                 pts->minuto = 0;
                 if (++pts->hora == 24)
                     pts->hora = 0;
+            }
+        }
+    }
+    if (Estado_Rel == CRONOMETRO)
+    {
+        if (++cro->miliseg == 10)
+        {
+            cro->miliseg = 0;
+            if (++cro->segundo == 60)
+            {
+                cro->segundo = 0;
+                if (++cro->minuto == 60)
+                {
+                    cro->minuto = 0;
+                }
             }
         }
     }
